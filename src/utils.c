@@ -17,6 +17,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <search.h>
@@ -40,7 +41,9 @@ int nss_mtl_utils_users_cmp(const void* a, const void* b) {
 	return strcmp(a, b);
 }
 
-void nss_mtl_utils_tree_size_calc(const void* , VISIT which, void* closure) {
+void nss_mtl_utils_tree_size_calc(const void* node, VISIT which, void* closure) {
+	(void)node;
+
 	if (which != postorder && which != leaf) {
 		return;
 	}
@@ -56,20 +59,26 @@ void nss_mtl_utils_list_fill(const void* node, VISIT which, void* closure) {
 
 	nss_mtl_utils_list_t* lst = (nss_mtl_utils_list_t*)closure;
 	char** value = (char**)node;
+
 	lst->items[lst->filled++] = *value;
 }
 
-void nss_mtl_utils_active_users_free(void*) {
+void nss_mtl_utils_active_users_free(void* node) {
 	/* do nothing */
+	(void)node;
 }
 
 void* nss_mtl_utils_local_users_get() {
 	void* local = NULL;
 
-	setpwent();
+	FILE* f = fopen(NSS_MTL_PASSWD_FILE, "r");
+	if (f == NULL) {
+		syslog(LOG_ERR, "%s: failed to open %s for reading: %m", __func__, NSS_MTL_PASSWD_FILE);
+		return NULL;
+	}
 
 	struct passwd* pw = NULL;
-	while ((pw = getpwent()) != NULL) {
+	while ((pw = fgetpwent(f)) != NULL) {
 		char* name = strdup(pw->pw_name);
 		char** node = tsearch(name, &local, nss_mtl_utils_str_cmp);
 		if (node == NULL || *node != name) {
@@ -77,7 +86,7 @@ void* nss_mtl_utils_local_users_get() {
 		}
 	}
 
-	endpwent();
+	fclose(f);
 
 	return local;
 }
@@ -107,7 +116,12 @@ nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
 		}
 		char* name = strdup(rec->ut_user);
 		char** node = tsearch(name, &active, nss_mtl_utils_str_cmp);
-		if (node == NULL || *node != name) {
+		if (node == NULL) {
+			syslog(LOG_ERR, "%s: cannot allocate buffer for user %s", __func__, name);
+			free(name);
+			nss_mtl_utils_local_users_free(local);
+			return NULL;
+		} else if (*node != name) {
 			/* username not unique */
 			free(name);
 		} else {
@@ -121,6 +135,7 @@ nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
 
 	size_t size = 0;
 	twalk_r(active, nss_mtl_utils_tree_size_calc, &size);
+	syslog(LOG_DEBUG, "%s: found %lu active users", __func__, size);
 
 	nss_mtl_utils_list_t* lst = nss_mtl_utils_list_alloc(size);;
 	if (lst == NULL) {
@@ -128,7 +143,7 @@ nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
 		return NULL;
 	}
 
-	twalk_r(active, nss_mtl_utils_list_fill, &lst);
+	twalk_r(active, nss_mtl_utils_list_fill, lst);
 	tdestroy(active, nss_mtl_utils_active_users_free);
 
 	return lst;
@@ -140,7 +155,7 @@ nss_mtl_utils_list_t* nss_mtl_utils_list_alloc(size_t nmemb) {
 	if (res == NULL) {
 		syslog(LOG_ERR, "%s: cannot allocate buffer of size %ld", __func__, size);
 	} else {
-		res->size = size;
+		res->size = nmemb;
 		res->filled = 0;
 		memset(res->items, 0, nmemb * sizeof(char*));
 	}
@@ -158,4 +173,8 @@ void nss_mtl_utils_list_free(nss_mtl_utils_list_t* lst) {
 	}
 
 	free(lst);
+}
+
+void nss_mtl_utils_syslog_init(int log_level) {
+	setlogmask(LOG_UPTO(log_level));
 }

@@ -1,5 +1,5 @@
 /*
- * utils.h
+ * mtl.h
  *
  * Copyright (c) 2024 Lukasz Krawiec
  *
@@ -17,38 +17,30 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef NSS_MTL_UTILS_H
-#define NSS_MTL_UTILS_H
+#ifndef NSS_MTL_H
+#define NSS_MTL_H
 
-#include <search.h>
-
-#ifndef NSS_MTL_PASSWD_FILE
-#define NSS_MTL_PASSWD_FILE "/etc/passwd"
-#endif
+#include <nss.h>
+#include <pwd.h>
+#include <grp.h>
+#include <shadow.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct {
-	size_t size;
-	size_t filled;
-	char* items[];
-} nss_mtl_utils_list_t;
+enum nss_status _nss_mtl_getpwnam_r(const char* name, struct passwd* pw, char* buffer, size_t buflen, int* errnop);
 
-void nss_mtl_utils_tree_size_calc(const void* node, VISIT which, void* closure);
-void nss_mtl_utils_list_fill(const void* node, VISIT which, void* closure);
+enum nss_status _nss_mtl_getspnam_r(const char* name, struct spwd* spw, char* buffer, size_t buflen, int* errnop);
 
-nss_mtl_utils_list_t* nss_mtl_utils_list_alloc(size_t nmemb);
-void nss_mtl_utils_list_free(nss_mtl_utils_list_t* lst);
-
-int nss_mtl_utils_str_cmp(const void* a, const void* b);
-nss_mtl_utils_list_t* nss_mtl_utils_users_get(void);
-
-void nss_mtl_utils_syslog_init(int log_level);
+enum nss_status _nss_mtl_setgrent(void);
+enum nss_status _nss_mtl_endgrent(void);
+enum nss_status _nss_mtl_getgrent_r(struct group* grp, char* buffer, size_t buflen, int* errnop);
+enum nss_status _nss_mtl_getgrnam_r(const char* name, struct group* grp, char* buffer, size_t buflen, int* errnop);
+enum nss_status _nss_mtl_getgrgid_r(gid_t gid, struct group* grp, char* buffer, size_t buflen, int* errnop);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
-#endif /* NSS_MTL_UTILS_H */
+#endif /* NSS_MTL_H */

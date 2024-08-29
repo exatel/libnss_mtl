@@ -28,18 +28,11 @@
 #include <errno.h>
 #include <assert.h>
 
-#include <nss.h>
-#include <pwd.h>
-#include <grp.h>
-#include <shadow.h>
-
-
+#include "mtl.h"
 #include "config.h"
 #include "utils.h"
 
-#ifndef NSS_MTL_PASSWD_FILE
-#define NSS_MTL_PASSWD_FILE "/etc/passwd"
-#endif
+extern char* __progname;
 
 #ifndef NSS_MTL_GROUP_FILE
 #define NSS_MTL_GROUP_FILE "/etc/group"
@@ -58,12 +51,12 @@ static bool nss_mtl_user_ignored(const nss_mtl_config_t* config, const char* nam
 static char* nss_mtl_parent_dir(const char* path);
 static nss_mtl_user_info_t* nss_mtl_user_info_read(const char* name);
 static void nss_mtl_user_info_free(nss_mtl_user_info_t* info);
-static enum nss_status nss_mtl_group_adapt(struct group* dst, const struct group* src, char* buffer, size_t buflen, int* errnop);
+static bool nss_mtl_group_adapt(nss_mtl_config_t* config, nss_mtl_utils_list_t* active_users, struct group* dst, const struct group* src, char* buffer, size_t buflen);
 
 static FILE* nss_mtl_group = NULL;
 static nss_mtl_config_t* nss_mtl_config = NULL;
 static nss_mtl_utils_list_t* nss_mtl_active_users = NULL;
-static nss_mtl_user_info_t* nss_mtl_target_user_info = NULL;
+static char nss_mtl_current_user[LOGIN_NAME_MAX + 1] = { '\0' };
 
 /* implementation */
 
@@ -89,7 +82,26 @@ bool nss_mtl_user_ignored(const nss_mtl_config_t* config, const char* name) {
 	}
 
 	const nss_mtl_utils_list_t* ignored = config->ignored_users;
-	return bsearch(name, ignored->items, ignored->filled, sizeof(char*), nss_mtl_utils_str_cmp) != NULL;
+	if (bsearch(name, ignored->items, ignored->filled, sizeof(char*), nss_mtl_utils_str_cmp) != NULL) {
+		return true;
+	}
+
+	FILE* f = fopen(NSS_MTL_PASSWD_FILE, "r");
+	struct passwd* entry = NULL;
+	while ((entry = fgetpwent(f)) != NULL) {
+		if (entry->pw_name == NULL) {
+			syslog(LOG_WARNING, "%s: found empty username in passwd file", __func__);
+			continue;
+		}
+		if (strcmp(entry->pw_name, name) == 0) {
+			syslog(LOG_DEBUG, "%s: ignoring local user %s", __func__, name);
+			break;
+		}
+	}
+
+	fclose(f);
+
+	return entry != NULL;
 }
 
 char* nss_mtl_parent_dir(const char* path) {
@@ -136,7 +148,7 @@ nss_mtl_user_info_t* nss_mtl_user_info_read(const char* name) {
 	}
 
 	if (info == NULL) {
-		syslog(LOG_ERR, "%s: target user %s not found in %s file", __func__, name, NSS_MTL_PASSWD_FILE);
+		syslog(LOG_WARNING, "%s: user %s not found in %s file", __func__, name, NSS_MTL_PASSWD_FILE);
 	}
 
 	return info;
@@ -151,96 +163,76 @@ void nss_mtl_user_info_free(nss_mtl_user_info_t* info) {
 	free(info);
 }
 
-enum nss_status _nss_mtl_setpwent(void) {
-	if (nss_mtl_config == NULL) {
-		nss_mtl_config = nss_mtl_config_parse(NULL);
-		if (nss_mtl_config == NULL) {
-			return NSS_STATUS_UNAVAIL;
-		}
-	}
-
-	if (nss_mtl_target_user_info == NULL) {
-		nss_mtl_target_user_info = nss_mtl_user_info_read(nss_mtl_config->target_user);
-		if (nss_mtl_target_user_info == NULL) {
-			nss_mtl_config_free(nss_mtl_config);
-			nss_mtl_config = NULL;
-			return NSS_STATUS_UNAVAIL;
-		}
-	}
-
-	return NSS_STATUS_SUCCESS;
-}
-
-enum nss_status _nss_mtl_endpwent(void) {
-	if (nss_mtl_target_user_info != NULL) {
-		nss_mtl_user_info_free(nss_mtl_target_user_info);
-		nss_mtl_target_user_info = NULL;
-	}
-
-	if (nss_mtl_config != NULL) {
-		nss_mtl_config_free(nss_mtl_config);
-		nss_mtl_config = NULL;
-	}
-
-	return NSS_STATUS_SUCCESS;
-}
-
 enum nss_status _nss_mtl_getpwnam_r(const char* name, struct passwd* pw, char* buffer, size_t buflen, int* errnop) {
-	if (nss_mtl_config == NULL || nss_mtl_target_user_info == NULL) {
-		syslog(LOG_ERR, "%s: passwd database not initialized", __func__);
+	nss_mtl_config_t* config = nss_mtl_config_parse(NULL);
+	if (config == NULL) {
 		return NSS_STATUS_UNAVAIL;
 	}
+	nss_mtl_utils_syslog_init(config->log_level);
 
-	if (nss_mtl_user_ignored(nss_mtl_config, name)) {
+	if (nss_mtl_user_ignored(config, name)) {
 		syslog(LOG_DEBUG, "%s: ignoring user %s", __func__, name);
 		return NSS_STATUS_NOTFOUND;
 	}
 
+	nss_mtl_user_info_t* target_user = nss_mtl_user_info_read(config->target_user);
+	if (target_user == NULL) {
+		nss_mtl_config_free(config);
+		return NSS_STATUS_UNAVAIL;
+	}
+
 	pw->pw_name = nss_mtl_alloc_static(&buffer, &buflen, strlen(name) + 1);
 	if (pw->pw_name == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		goto bufsize_err;
 	} else {
 		strcpy(pw->pw_name, name);
 	}
 
 	pw->pw_passwd = nss_mtl_alloc_static(&buffer, &buflen, sizeof(char) * 2);
 	if (pw->pw_passwd == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		goto bufsize_err;
 	} else {
 		strcpy(pw->pw_passwd, "x");
 	}
 
-	pw->pw_uid = nss_mtl_target_user_info->uid;
-	pw->pw_gid = nss_mtl_target_user_info->gid;
+	pw->pw_uid = target_user->uid;
+	pw->pw_gid = target_user->gid;
 
-	pw->pw_gecos = nss_mtl_alloc_static(&buffer, &buflen, strlen(nss_mtl_target_user_info->gecos) + 1);
+	pw->pw_gecos = nss_mtl_alloc_static(&buffer, &buflen, strlen(target_user->gecos) + 1);
 	if (pw->pw_gecos == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		goto bufsize_err;
 	} else {
-		strcpy(pw->pw_gecos, nss_mtl_target_user_info->gecos);
+		strcpy(pw->pw_gecos, target_user->gecos);
 	}
 
-	const size_t homedir_size = strlen(nss_mtl_target_user_info->homedir_root) + strlen(name) + 2;
+	const size_t homedir_size = strlen(target_user->homedir_root) + strlen(name) + 2;
 	pw->pw_dir = nss_mtl_alloc_static(&buffer, &buflen, homedir_size);
 	if (pw->pw_dir == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		goto bufsize_err;
 	} else {
-		snprintf(pw->pw_dir, homedir_size, "%s/%s", nss_mtl_target_user_info->homedir_root, name);
+		snprintf(pw->pw_dir, homedir_size, "%s/%s", target_user->homedir_root, name);
 	}
 
-	pw->pw_shell = nss_mtl_alloc_static(&buffer, &buflen, strlen(nss_mtl_target_user_info->shell) + 1);
+	pw->pw_shell = nss_mtl_alloc_static(&buffer, &buflen, strlen(target_user->shell) + 1);
 	if (pw->pw_shell == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		goto bufsize_err;
 	} else {
-		strcpy(pw->pw_shell, nss_mtl_target_user_info->shell);
+		strcpy(pw->pw_shell, target_user->shell);
 	}
 
+	/* store last used argument to properly assign groups for non-local users during login procedure */
+	syslog(LOG_DEBUG, "%s: storing user %s", __func__, name);
+	strncpy(nss_mtl_current_user, name, LOGIN_NAME_MAX);
+
+	nss_mtl_config_free(config);
+	nss_mtl_user_info_free(target_user);
 	return NSS_STATUS_SUCCESS;
+
+	bufsize_err:
+	*errnop = ERANGE;
+	nss_mtl_config_free(config);
+	nss_mtl_user_info_free(target_user);
+	return NSS_STATUS_TRYAGAIN;
 }
 
 enum nss_status _nss_mtl_getspnam_r(const char* name, struct spwd* spw, char* buffer, size_t buflen, int* errnop) {
@@ -274,6 +266,7 @@ enum nss_status _nss_mtl_setgrent(void) {
 		if (nss_mtl_config == NULL) {
 			return NSS_STATUS_UNAVAIL;
 		}
+		nss_mtl_utils_syslog_init(nss_mtl_config->log_level);
 	}
 	if (nss_mtl_active_users == NULL) {
 		nss_mtl_active_users = nss_mtl_utils_users_get();
@@ -321,22 +314,23 @@ enum nss_status _nss_mtl_endgrent(void) {
 	return NSS_STATUS_SUCCESS;
 }
 
-enum nss_status nss_mtl_group_adapt(struct group* dst, const struct group* src, char* buffer, size_t buflen, int* errnop) {
-	assert(nss_mtl_config != NULL);
-	assert(nss_mtl_active_users != NULL);
+bool nss_mtl_group_adapt(nss_mtl_config_t* config, nss_mtl_utils_list_t* active_users, struct group* dst, const struct group* src, char* buffer, size_t buflen) {
+	assert(config != NULL);
+	assert(active_users != NULL);
+	assert(dst != NULL);
+	assert(src != NULL);
+	assert(buffer != NULL);
 
 	dst->gr_name = nss_mtl_alloc_static(&buffer, &buflen, strlen(src->gr_name) + 1);
 	if (dst->gr_name == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		return false;
 	} else {
 		strcpy(dst->gr_name, src->gr_name);
 	}
 
 	dst->gr_passwd = nss_mtl_alloc_static(&buffer, &buflen, strlen(src->gr_passwd) + 1);
 	if (dst->gr_passwd == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		return false;
 	} else {
 		strcpy(dst->gr_passwd, src->gr_passwd);
 	}
@@ -346,43 +340,54 @@ enum nss_status nss_mtl_group_adapt(struct group* dst, const struct group* src, 
 	size_t msize = 0;
 	bool has_target_user = false;
 	while (src->gr_mem[msize] != NULL) {
-		if (strcmp(src->gr_mem[msize], nss_mtl_config->target_user) == 0) {
+		if (strcmp(src->gr_mem[msize], config->target_user) == 0) {
 			has_target_user = true;
 		}
 		++msize;
 	}
 
-	const size_t target_msize = msize + (has_target_user ? nss_mtl_active_users->filled : 1);
+	bool add_current_user = has_target_user && (strlen(nss_mtl_current_user) > 0);
+	const size_t target_msize = msize + (has_target_user ? active_users->filled : 0) + (add_current_user ? 1 : 0) + 1;
 	dst->gr_mem = (char**)nss_mtl_alloc_static(&buffer, &buflen, target_msize * sizeof(char*));
 	if (dst->gr_mem == NULL) {
-		*errnop = ERANGE;
-		return NSS_STATUS_TRYAGAIN;
+		return false;
 	}
+	memset(dst->gr_mem, 0, target_msize * sizeof(char*));
 
-	for (size_t i = 0, j = 0; i < msize; ++i) {
-		if (strcmp(src->gr_mem[i], nss_mtl_config->target_user) == 0) {
-			for (size_t k = 0; k < nss_mtl_active_users->filled; ++k) {
-				dst->gr_mem[j] = nss_mtl_alloc_static(&buffer, &buflen, strlen(nss_mtl_active_users->items[k]) + 1);
-				if (dst->gr_mem[j] == NULL) {
-					*errnop = ERANGE;
-					return NSS_STATUS_TRYAGAIN;
+	int idx = 0;
+	for (size_t i = 0; i < msize; ++i) {
+		if (strcmp(src->gr_mem[i], config->target_user) == 0) {
+			syslog(LOG_DEBUG, "%s: found %s as group %s member, extending with active users", __func__, config->target_user, src->gr_name);
+			for (size_t k = 0; k < active_users->filled; ++k) {
+				dst->gr_mem[idx] = nss_mtl_alloc_static(&buffer, &buflen, strlen(active_users->items[k]) + 1);
+				if (dst->gr_mem[idx] == NULL) {
+					return false;
 				} else {
-					strcpy(dst->gr_mem[j++], nss_mtl_active_users->items[k]);
+					strcpy(dst->gr_mem[idx++], active_users->items[k]);
 				}
 			}
-		} else {
-			dst->gr_mem[j] = nss_mtl_alloc_static(&buffer, &buflen, strlen(src->gr_mem[i]) + 1);
-			if (dst->gr_mem[j] == NULL) {
-				*errnop = ERANGE;
-				return NSS_STATUS_TRYAGAIN;
-			} else {
-				strcpy(dst->gr_mem[j++], src->gr_mem[i]);
+			if (add_current_user) {
+				dst->gr_mem[idx] = nss_mtl_alloc_static(&buffer, &buflen, strlen(nss_mtl_current_user) + 1);
+				if (dst->gr_mem[idx] == NULL) {
+					return false;
+				} else {
+					strcpy(dst->gr_mem[idx++], nss_mtl_current_user);
+				}
 			}
+		}
+		if (add_current_user && (strcmp(src->gr_mem[i], nss_mtl_current_user) == 0)) {
+			/* avoid duplicates */
+			continue;
+		}
+		dst->gr_mem[idx] = nss_mtl_alloc_static(&buffer, &buflen, strlen(src->gr_mem[i]) + 1);
+		if (dst->gr_mem[idx] == NULL) {
+			return false;
+		} else {
+			strcpy(dst->gr_mem[idx++], src->gr_mem[i]);
 		}
 	}
 
-
-	return NSS_STATUS_SUCCESS;
+	return true;
 }
 
 enum nss_status _nss_mtl_getgrent_r(struct group* grp, char* buffer, size_t buflen, int* errnop) {
@@ -395,31 +400,97 @@ enum nss_status _nss_mtl_getgrent_r(struct group* grp, char* buffer, size_t bufl
 	}
 
 	const struct group* entry = fgetgrent(nss_mtl_group);
-	return (entry != NULL) ? nss_mtl_group_adapt(grp, entry, buffer, buflen, errnop) : NSS_STATUS_NOTFOUND;
+	if (entry == NULL) {
+		return NSS_STATUS_NOTFOUND;
+	} else if (! nss_mtl_group_adapt(nss_mtl_config, nss_mtl_active_users, grp, entry, buffer, buflen)) {
+		*errnop = ERANGE;
+		return NSS_STATUS_TRYAGAIN;
+	} else {
+		return NSS_STATUS_SUCCESS;
+	}
 }
 
 enum nss_status _nss_mtl_getgrnam_r(const char* name, struct group* grp, char* buffer, size_t buflen, int* errnop) {
-	if (nss_mtl_active_users == NULL || nss_mtl_config == NULL) {
-		syslog(LOG_ERR, "%s: group database not initialized", __func__);
+	nss_mtl_config_t* config = nss_mtl_config_parse(NULL);
+	if (config == NULL) {
+		return NSS_STATUS_UNAVAIL;
+	}
+	nss_mtl_utils_syslog_init(config->log_level);
+
+	nss_mtl_utils_list_t* active_users = nss_mtl_utils_users_get();
+	if (active_users == NULL) {
+		nss_mtl_config_free(config);
 		return NSS_STATUS_UNAVAIL;
 	}
 
 	FILE* f = fopen(NSS_MTL_GROUP_FILE, "r");
 	if (f == NULL) {
 		syslog(LOG_ERR, "%s: failed to open %s for reading: %m", __func__, NSS_MTL_GROUP_FILE);
+		nss_mtl_config_free(config);
+		nss_mtl_utils_list_free(active_users);
+		return NSS_STATUS_UNAVAIL;
+	}
+
+
+	enum nss_status status = NSS_STATUS_NOTFOUND;
+	const struct group* entry = NULL;
+	while ((entry = fgetgrent(f)) != NULL) {
+		if (strcmp(entry->gr_name, name) == 0) {
+			if (! nss_mtl_group_adapt(config, active_users, grp, entry, buffer, buflen)) {
+				*errnop = ERANGE;
+				status = NSS_STATUS_TRYAGAIN;
+			} else {
+				status = NSS_STATUS_SUCCESS;
+			}
+			break;
+		}
+	}
+
+	fclose(f);
+	nss_mtl_config_free(config);
+	nss_mtl_utils_list_free(active_users);
+
+	return status;
+}
+
+enum nss_status _nss_mtl_getgrgid_r(gid_t gid, struct group* grp, char* buffer, size_t buflen, int* errnop) {
+	nss_mtl_config_t* config = nss_mtl_config_parse(NULL);
+	if (config == NULL) {
+		return NSS_STATUS_UNAVAIL;
+	}
+	nss_mtl_utils_syslog_init(config->log_level);
+
+	nss_mtl_utils_list_t* active_users = nss_mtl_utils_users_get();
+	if (active_users == NULL) {
+		nss_mtl_config_free(config);
+		return NSS_STATUS_UNAVAIL;
+	}
+
+	FILE* f = fopen(NSS_MTL_GROUP_FILE, "r");
+	if (f == NULL) {
+		syslog(LOG_ERR, "%s: failed to open %s for reading: %m", __func__, NSS_MTL_GROUP_FILE);
+		nss_mtl_config_free(config);
+		nss_mtl_utils_list_free(active_users);
 		return NSS_STATUS_UNAVAIL;
 	}
 
 	enum nss_status status = NSS_STATUS_NOTFOUND;
 	const struct group* entry = NULL;
 	while ((entry = fgetgrent(f)) != NULL) {
-		if (strcmp(entry->gr_name, name) == 0) {
-			status = nss_mtl_group_adapt(grp, entry, buffer, buflen, errnop);
+		if (entry->gr_gid == gid) {
+			if (! nss_mtl_group_adapt(config, active_users, grp, entry, buffer, buflen)) {
+				*errnop = ERANGE;
+				status = NSS_STATUS_TRYAGAIN;
+			} else {
+				status = NSS_STATUS_SUCCESS;
+			}
 			break;
 		}
 	}
 
 	fclose(f);
+	nss_mtl_config_free(config);
+	nss_mtl_utils_list_free(active_users);
 
 	return status;
 }

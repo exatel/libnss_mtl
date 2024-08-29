@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <getopt.h>
 
+#include "src/mtl.h"
 #include "src/config.h"
 #include "src/utils.h"
 
@@ -22,19 +24,65 @@ static void print_config(nss_mtl_config_t* config) {
 }
 
 int main(int argc, char* argv[]) {
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <config_file>\n", argv[0]);
-		return EXIT_FAILURE;
+	char* conf = NULL;
+	char* user = NULL;
+	char* group = NULL;
+
+	int opt = 0;
+	while ((opt = getopt(argc, argv, "c:u:g:")) != -1) {
+		switch (opt) {
+		case 'c':
+			conf = optarg;
+			break;
+		case 'u':
+			user = optarg;
+			break;
+		case 'g':
+			group = optarg;
+			break;
+		default:
+			fprintf(stderr, "Usage: %s [-c <config_file>] [-u <username>] [-g groupname]\n", argv[0]);
+			return EXIT_FAILURE;
+		}
 	}
 
-	nss_mtl_config_t* config = nss_mtl_config_parse(argv[1]);
-	print_config(config);
-
-	nss_mtl_config_free(config);
 
 	nss_mtl_utils_list_t* users = nss_mtl_utils_users_get();
 	printf("Logged in users =");
 	print_list(users);
+
+	if (conf != NULL) {
+		nss_mtl_config_t* config = nss_mtl_config_parse(conf);
+		print_config(config);
+		nss_mtl_config_free(config);
+	}
+
+	char buffer[BUFSIZ];
+	int errnop = 0;
+
+	if (user != NULL) {
+		struct passwd pw;
+		enum nss_status status = _nss_mtl_getpwnam_r(user, &pw, buffer, BUFSIZ, &errnop);
+		if (status != NSS_STATUS_SUCCESS) {
+			fprintf(stderr, "Cannot acquire user info: %d (%d)\n", status, errnop);
+		} else {
+			printf("user %s, uid = %u, homedir = %s, shell = %s\n", pw.pw_name, pw.pw_uid, pw.pw_dir, pw.pw_shell);
+		}
+	}
+
+	if (group != NULL) {
+		struct group g;
+		enum nss_status status = _nss_mtl_getgrnam_r(group, &g, buffer, BUFSIZ, &errnop);
+		if (status != NSS_STATUS_SUCCESS) {
+			fprintf(stderr, "Cannot acquire group info: %d (%d)\n", status, errnop);
+		} else {
+			printf("group %s, members: ", g.gr_name);
+			for (size_t i = 0; g.gr_mem[i] != NULL; ++i) {
+				printf("%s%s", g.gr_mem[i], (g.gr_mem[i+1] != NULL) ? ", " : "");
+			}
+			printf("\n");
+		}
+	}
 
 	return EXIT_SUCCESS;
 }
