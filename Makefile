@@ -1,4 +1,4 @@
-VERSION ?= 1.0.0
+VERSION ?= 1.0.1
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)

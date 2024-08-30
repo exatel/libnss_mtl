@@ -172,6 +172,7 @@ enum nss_status _nss_mtl_getpwnam_r(const char* name, struct passwd* pw, char* b
 
 	if (nss_mtl_user_ignored(config, name)) {
 		syslog(LOG_DEBUG, "%s: ignoring user %s", __func__, name);
+		nss_mtl_config_free(config);
 		return NSS_STATUS_NOTFOUND;
 	}
 
