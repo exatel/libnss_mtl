@@ -50,6 +50,7 @@ int main(int argc, char* argv[]) {
 	nss_mtl_utils_list_t* users = nss_mtl_utils_users_get();
 	printf("Logged in users =");
 	print_list(users);
+	nss_mtl_utils_list_free(users);
 
 	if (conf != NULL) {
 		nss_mtl_config_t* config = nss_mtl_config_parse(conf);

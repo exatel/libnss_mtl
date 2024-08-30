@@ -117,6 +117,7 @@ nss_mtl_config_t* nss_mtl_config_parse(const char* path) {
 		syslog(LOG_ERR, "%s: could not allocate config: %m", __func__);
 		return NULL;
 	}
+	memset(config, 0, sizeof(nss_mtl_config_t));
 
 	char* token = NULL;
 	while (fgets(buffer, sizeof(buffer), f) != NULL) {
