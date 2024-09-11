@@ -27,6 +27,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <assert.h>
+#include <time.h>
 
 #include "mtl.h"
 #include "config.h"
@@ -52,6 +53,7 @@ static char* nss_mtl_parent_dir(const char* path);
 static nss_mtl_user_info_t* nss_mtl_user_info_read(const char* name);
 static void nss_mtl_user_info_free(nss_mtl_user_info_t* info);
 static bool nss_mtl_group_adapt(nss_mtl_config_t* config, nss_mtl_utils_list_t* active_users, struct group* dst, const struct group* src, char* buffer, size_t buflen);
+static long nss_mtl_today();
 
 static FILE* nss_mtl_group = NULL;
 static nss_mtl_config_t* nss_mtl_config = NULL;
@@ -163,6 +165,13 @@ void nss_mtl_user_info_free(nss_mtl_user_info_t* info) {
 	free(info);
 }
 
+long nss_mtl_today() {
+	time_t t = time(NULL);
+
+	/* convert to days */
+	return t / (60 * 60 * 24);
+}
+
 enum nss_status _nss_mtl_getpwnam_r(const char* name, struct passwd* pw, char* buffer, size_t buflen, int* errnop) {
 	nss_mtl_config_t* config = nss_mtl_config_parse(NULL);
 	if (config == NULL) {
@@ -251,12 +260,14 @@ enum nss_status _nss_mtl_getspnam_r(const char* name, struct spwd* spw, char* bu
 	}
 	strcpy(spw->sp_pwdp, "*");
 
-	spw->sp_lstchg = 0;
+	long today = nss_mtl_today();
+
+	spw->sp_lstchg = today;
 	spw->sp_min = 0;
 	spw->sp_max = LONG_MAX;
 	spw->sp_warn = LONG_MAX;
-	spw->sp_inact = 0;
-	spw->sp_expire = LONG_MAX;
+	spw->sp_inact = LONG_MAX;
+	spw->sp_expire = today + 1;
 
 	return NSS_STATUS_SUCCESS;
 }
