@@ -28,6 +28,7 @@ typedef struct {
 	int log_level;
 	char* target_user;
 	nss_mtl_utils_list_t* ignored_users;
+	nss_mtl_utils_list_t* ignored_execs;
 } nss_mtl_config_t;
 
 nss_mtl_config_t* nss_mtl_config_parse(const char* path);

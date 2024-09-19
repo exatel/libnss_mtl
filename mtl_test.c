@@ -21,6 +21,8 @@ static void print_config(nss_mtl_config_t* config) {
 	printf("target_user = %s\n", config->target_user);
 	printf("ignored_users =");
 	print_list(config->ignored_users);
+	printf("ignored_execs =");
+	print_list(config->ignored_execs);
 }
 
 int main(int argc, char* argv[]) {

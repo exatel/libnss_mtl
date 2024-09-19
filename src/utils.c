@@ -37,9 +37,7 @@ static void nss_mtl_utils_local_users_free(void* users);
 
 /* implementation */
 
-int nss_mtl_utils_users_cmp(const void* a, const void* b) {
-	return strcmp(a, b);
-}
+static int nss_mtl_utils_log_level = LOG_INFO;
 
 void nss_mtl_utils_tree_size_calc(const void* node, VISIT which, void* closure) {
 	(void)node;
@@ -73,7 +71,7 @@ void* nss_mtl_utils_local_users_get() {
 
 	FILE* f = fopen(NSS_MTL_PASSWD_FILE, "r");
 	if (f == NULL) {
-		syslog(LOG_ERR, "%s: failed to open %s for reading: %m", __func__, NSS_MTL_PASSWD_FILE);
+		nss_mtl_utils_log(LOG_ERR, "%s: failed to open %s for reading: %m", __func__, NSS_MTL_PASSWD_FILE);
 		return NULL;
 	}
 
@@ -96,7 +94,16 @@ void nss_mtl_utils_local_users_free(void* users) {
 }
 
 int nss_mtl_utils_str_cmp(const void* a, const void* b) {
-	return strcmp(a, b);
+	const char* sa = a;
+	const char* sb = b;
+	return strcmp(sa, sb);
+}
+
+int nss_mtl_utils_strptr_cmp(const void* a, const void* b) {
+	const char* const* ptr_a = a;
+	const char* const* ptr_b = b;
+
+	return strcmp(*ptr_a, *ptr_b);
 }
 
 nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
@@ -110,14 +117,14 @@ nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
 		if (rec->ut_type != USER_PROCESS) {
 			continue;
 		}
-		if (tfind(rec->ut_user, &local, nss_mtl_utils_users_cmp) != NULL) {
-			syslog(LOG_DEBUG, "%s: ignoring local user %s", __func__, rec->ut_user);
+		if (tfind(rec->ut_user, &local, nss_mtl_utils_str_cmp) != NULL) {
+			nss_mtl_utils_log(LOG_DEBUG, "%s: ignoring local user %s", __func__, rec->ut_user);
 			continue;
 		}
 		char* name = strdup(rec->ut_user);
 		char** node = tsearch(name, &active, nss_mtl_utils_str_cmp);
 		if (node == NULL) {
-			syslog(LOG_ERR, "%s: cannot allocate buffer for user %s", __func__, name);
+			nss_mtl_utils_log(LOG_ERR, "%s: cannot allocate buffer for user %s", __func__, name);
 			free(name);
 			nss_mtl_utils_local_users_free(local);
 			return NULL;
@@ -125,7 +132,7 @@ nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
 			/* username not unique */
 			free(name);
 		} else {
-			syslog(LOG_DEBUG, "%s: found user %s", __func__, name);
+			nss_mtl_utils_log(LOG_DEBUG, "%s: found user %s", __func__, name);
 		}
 	}
 
@@ -135,7 +142,7 @@ nss_mtl_utils_list_t* nss_mtl_utils_users_get(void) {
 
 	size_t size = 0;
 	twalk_r(active, nss_mtl_utils_tree_size_calc, &size);
-	syslog(LOG_DEBUG, "%s: found %lu active users", __func__, size);
+	nss_mtl_utils_log(LOG_DEBUG, "%s: found %lu active users", __func__, size);
 
 	nss_mtl_utils_list_t* lst = nss_mtl_utils_list_alloc(size);;
 	if (lst == NULL) {
@@ -153,7 +160,7 @@ nss_mtl_utils_list_t* nss_mtl_utils_list_alloc(size_t nmemb) {
 	const size_t size = sizeof(nss_mtl_utils_list_t) + nmemb * sizeof(char*);
 	nss_mtl_utils_list_t* res = malloc(size);
 	if (res == NULL) {
-		syslog(LOG_ERR, "%s: cannot allocate buffer of size %ld", __func__, size);
+		nss_mtl_utils_log(LOG_ERR, "%s: cannot allocate buffer of size %ld", __func__, size);
 	} else {
 		res->size = nmemb;
 		res->filled = 0;
@@ -175,6 +182,15 @@ void nss_mtl_utils_list_free(nss_mtl_utils_list_t* lst) {
 	free(lst);
 }
 
-void nss_mtl_utils_syslog_init(int log_level) {
-	setlogmask(LOG_UPTO(log_level));
+void nss_mtl_utils_log_setup(int log_level) {
+	nss_mtl_utils_log_level = log_level;
+}
+
+void nss_mtl_utils_log(int level, const char* fmt, ...) {
+	if (level <= nss_mtl_utils_log_level) {
+		va_list args;
+		va_start(args, fmt);
+		vsyslog(level, fmt, args);
+		va_end(args);
+	}
 }

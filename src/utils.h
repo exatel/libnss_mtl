@@ -20,6 +20,7 @@
 #ifndef NSS_MTL_UTILS_H
 #define NSS_MTL_UTILS_H
 
+#include <stdarg.h>
 #include <search.h>
 
 #ifndef NSS_MTL_PASSWD_FILE
@@ -43,9 +44,12 @@ nss_mtl_utils_list_t* nss_mtl_utils_list_alloc(size_t nmemb);
 void nss_mtl_utils_list_free(nss_mtl_utils_list_t* lst);
 
 int nss_mtl_utils_str_cmp(const void* a, const void* b);
+int nss_mtl_utils_strptr_cmp(const void* a, const void* b);
+
 nss_mtl_utils_list_t* nss_mtl_utils_users_get(void);
 
-void nss_mtl_utils_syslog_init(int log_level);
+void nss_mtl_utils_log_setup(int log_level);
+void nss_mtl_utils_log(int level, const char* fmt, ...);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -41,20 +41,16 @@
 #define NSS_MTL_CONFIG_FILE "/etc/nss_mtl.conf"
 #endif
 
-#ifndef NSS_MTL_EXCLUDED_USERS_SIZE
-#define NSS_MTL_EXCLUDED_USERS_SIZE 32
-#endif
-
 #define KEY_VALUE_DELIMITERS "= \t\r\n"
 #define COMMA_SEPARATED_VALUE_DELIMITERS "=, \t\r\n"
 
-static void* nss_mtl_config_ignored_users_parse(void);
-static void nss_mtl_config_ignored_users_free(void* node);
+static void* nss_mtl_config_uniq_list_parse(void);
+static void nss_mtl_config_uniq_list_free(void* node);
 static int nss_mtl_config_log_level_parse(const char* level);
 
 /* implementation */
 
-void* nss_mtl_config_ignored_users_parse(void) {
+void* nss_mtl_config_uniq_list_parse(void) {
 	void* tree = NULL;
 
 	/* Note: we rely here on internal buffer of strtok() function */
@@ -63,11 +59,11 @@ void* nss_mtl_config_ignored_users_parse(void) {
 		char* name = strdup(token);
 		char** node = tsearch(name, &tree, nss_mtl_utils_str_cmp);
 		if (node == NULL) {
-			syslog(LOG_ERR, "%s: cannot allocate buffer for ignored_users list", __func__);
+			nss_mtl_utils_log(LOG_ERR, "%s: cannot allocate buffer for unique list", __func__);
 			tdestroy(tree, free);
 			return NULL;
 		} else if (*node != name) {
-			syslog(LOG_WARNING, "%s: duplicate ignored user detected: %s", __func__, name);
+			nss_mtl_utils_log(LOG_WARNING, "%s: duplicate entry detected: %s", __func__, name);
 			free(name);
 		}
 	}
@@ -75,7 +71,7 @@ void* nss_mtl_config_ignored_users_parse(void) {
 	return tree;
 }
 
-void nss_mtl_config_ignored_users_free(void* node) {
+void nss_mtl_config_uniq_list_free(void* node) {
 	(void)node;
 	/* do nothing */
 }
@@ -90,7 +86,7 @@ int nss_mtl_config_log_level_parse(const char* level) {
 	}
 
 	if (ret < 0) {
-		syslog(LOG_WARNING, "%s: unknown log_level value: %s", __func__, level);
+		nss_mtl_utils_log(LOG_WARNING, "%s: unknown log_level value: %s", __func__, level);
 		ret = LOG_INFO;
 	}
 
@@ -104,17 +100,19 @@ nss_mtl_config_t* nss_mtl_config_parse(const char* path) {
 
 	FILE* f = fopen(path, "r");
 	if (f == NULL) {
-		syslog(LOG_ERR, "%s: cannot open config file %s: %m", __func__, path);
+		nss_mtl_utils_log(LOG_ERR, "%s: cannot open config file %s: %m", __func__, path);
 		return NULL;
 	}
 
 	char buffer[BUFSIZ];
 	void* ignored_users = NULL;
 	size_t ignored_users_size = 0;
+	void* ignored_execs = NULL;
+	size_t ignored_execs_size = 0;
 
 	nss_mtl_config_t* config = malloc(sizeof(nss_mtl_config_t));
 	if (config == NULL) {
-		syslog(LOG_ERR, "%s: could not allocate config: %m", __func__);
+		nss_mtl_utils_log(LOG_ERR, "%s: could not allocate config: %m", __func__);
 		return NULL;
 	}
 	memset(config, 0, sizeof(nss_mtl_config_t));
@@ -129,40 +127,53 @@ nss_mtl_config_t* nss_mtl_config_parse(const char* path) {
 		if (strcmp(token, "log_level") == 0) {
 			token = strtok(NULL, KEY_VALUE_DELIMITERS);
 			if (token == NULL) {
-				syslog(LOG_WARNING, "%s: missing value for log_level key", __func__);
+				nss_mtl_utils_log(LOG_WARNING, "%s: missing value for log_level key", __func__);
 			} else {
 				config->log_level = nss_mtl_config_log_level_parse(token);
 			}
 		} else if (strcmp(token, "target_user") == 0) {
 			token = strtok(NULL, KEY_VALUE_DELIMITERS);
 			if (token == NULL) {
-				syslog(LOG_WARNING, "%s: missing value for target_user key", __func__);
+				nss_mtl_utils_log(LOG_WARNING, "%s: missing value for target_user key", __func__);
 			} else {
 				config->target_user = strdup(token);
 			}
 		} else if (strcmp(token, "ignored_users") == 0) {
-			ignored_users = nss_mtl_config_ignored_users_parse();
+			ignored_users = nss_mtl_config_uniq_list_parse();
 			if (ignored_users != NULL) {
 				twalk_r(ignored_users, nss_mtl_utils_tree_size_calc, &ignored_users_size);
+			}
+		} else if (strcmp(token, "ignored_execs") == 0) {
+			ignored_execs = nss_mtl_config_uniq_list_parse();
+			if (ignored_execs != NULL) {
+				twalk_r(ignored_execs, nss_mtl_utils_tree_size_calc, &ignored_execs_size);
 			}
 		}
 	}
 
 	if (config->target_user == NULL || strlen(config->target_user) == 0) {
-		syslog(LOG_ERR, "%s: target_user not defined, cannot continue", __func__);
+		nss_mtl_utils_log(LOG_ERR, "%s: target_user not defined, cannot continue", __func__);
 		nss_mtl_config_free(config);
 		return NULL;
 	}
 
 	config->ignored_users = nss_mtl_utils_list_alloc(ignored_users_size);
 	if (config->ignored_users == NULL) {
-		syslog(LOG_ERR, "%s: could not allocate buffer for ignored_users list of size %ld: %m", __func__, ignored_users_size);
+		nss_mtl_utils_log(LOG_ERR, "%s: could not allocate buffer for ignored_users list of size %ld: %m", __func__, ignored_users_size);
 		nss_mtl_config_free(config);
 		return NULL;
 	}
-
 	twalk_r(ignored_users, nss_mtl_utils_list_fill, config->ignored_users);
-	tdestroy(ignored_users, nss_mtl_config_ignored_users_free);
+	tdestroy(ignored_users, nss_mtl_config_uniq_list_free);
+
+	config->ignored_execs = nss_mtl_utils_list_alloc(ignored_execs_size);
+	if (config->ignored_execs == NULL) {
+		nss_mtl_utils_log(LOG_ERR, "%s: could not allocate buffer for ignored_execs list of size %ld: %m", __func__, ignored_execs_size);
+		nss_mtl_config_free(config);
+		return NULL;
+	}
+	twalk_r(ignored_execs, nss_mtl_utils_list_fill, config->ignored_execs);
+	tdestroy(ignored_execs, nss_mtl_config_uniq_list_free);
 
 	return config;
 }
